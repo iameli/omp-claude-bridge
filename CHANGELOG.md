@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Rebuild shortened conversation histories instead of silently starting Claude
+  with only the latest prompt.
+- Keep recap, side-channel, and concurrent requests from reusing another
+  request's session file or advancing its message cursor.
+- Preserve every parallel tool result during history replay instead of replacing
+  later results with synthetic missing-result errors.
+
 ## [0.8.1] - 2026-07-07
 
 ### Fixed

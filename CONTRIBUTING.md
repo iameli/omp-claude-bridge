@@ -13,7 +13,7 @@ bun install        # or: npm install
 
 Requirements:
 - Node.js >= 20
-- [Bun](https://bun.sh) (recommended) or npm
+- [Bun](https://bun.sh) (required for provider lifecycle tests that load OMP's runtime).
 - An Oh My Pi install for end-to-end testing ([omp.sh](https://omp.sh))
 
 ## Developing against a live Oh My Pi
