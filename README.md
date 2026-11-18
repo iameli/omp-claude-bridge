@@ -267,6 +267,20 @@ normal portable projection.
 Isolated flows owned directly by the bridge (compaction/branch-summary) keep their own
 explicit prompts. The AskClaude tool continues to forward the skills block as before.
 
+### Native OMP advisor support
+
+OMP's native advisor is its own Agent with a dedicated `advise` tool and a
+system prompt assembled directly by AdvisorController, outside the extension
+`before_agent_start` event. The bridge recognizes that OMP-owned contract,
+transports the advisor's complete prompt verbatim (without the Claude Code
+coding-agent preset), and isolates its resumable Claude Code session by OMP's
+provider `sessionId`. The primary agent retains strict prompt capture and
+AskClaude session sharing.
+
+An unrecognized advisor prompt still fails closed rather than silently losing
+instructions. After an OMP upgrade that changes the built-in advisor prompt,
+update the recognition contract and tests before enabling this transport.
+
 ## Debugging
 
 Set `CLAUDE_BRIDGE_DEBUG=1` for detailed logs:

@@ -94,3 +94,24 @@ test("side request with no system prompt stays a bare utility completion", () =>
 		systemPrompt: undefined,
 	});
 });
+
+test("OMP native advisor uses its own prompt verbatim despite cwd and no capture", () => {
+	const captures = new PromptCaptures();
+	captures.record("PRIMARY-AGENT-HARNESS", { custom: "MAIN-CUSTOM", contextFiles: [], skills: [] });
+	const prompt = "ADVISOR-SYSTEM-PROMPT";
+	const result = resolveProviderPromptTransport(captures, prompt, {
+		cwd: "/repo",
+		nativeAdvisor: true,
+	});
+	assert.deepEqual(result, { mode: "verbatim-side-request", systemPrompt: prompt });
+	assert.equal(captures.size, 1);
+});
+
+test("OMP native advisor does not project even if its prompt matches an agent capture", () => {
+	const captures = new PromptCaptures();
+	captures.record("ADVISOR-SYSTEM-PROMPT", { custom: "INAPPROPRIATE-PROJECTION", contextFiles: [], skills: [] });
+	const result = resolveProviderPromptTransport(captures, "ADVISOR-SYSTEM-PROMPT", {
+		cwd: "/repo", nativeAdvisor: true,
+	});
+	assert.deepEqual(result, { mode: "verbatim-side-request", systemPrompt: "ADVISOR-SYSTEM-PROMPT" });
+});

@@ -20,6 +20,8 @@ import { rateLimitNotice } from "./rate-limit.js";
 import { registerSharedProvider, releaseSharedProvider } from "./provider-registration.js";
 import { sharedPromptCaptures, releaseSharedPromptCaptures, deriveCaptureInput, type PromptCaptureDiagnostic, type PromptCaptures } from "./prompt-capture.js";
 import { resolveProviderPromptTransport, type ProviderPromptTransport } from "./prompt-transport.js";
+import { isNativeAdvisorContext } from "./native-advisor.js";
+import { ProviderSessionScopes, type ProviderSessionSlot } from "./provider-session-scopes.js";
 import {
 	compactWithCompleteImpl,
 	createHostAssistantMessageEventStream,
@@ -200,7 +202,9 @@ interface SessionState {
 	forceRotate?: boolean;
 }
 
-let sharedSession: SessionState | null = null;
+// The main agent (and AskClaude) retain their original shared session. Native
+// OMP advisors use their own provider session IDs, never the main session state.
+const providerSessions = new ProviderSessionScopes<SessionState>();
 
 // Convert pi messages to Anthropic API format for session import.
 // Lossy: non-Anthropic thinking blocks are dropped (no valid signature), and only
@@ -547,6 +551,7 @@ function syncSharedSession(
 	cwd: string,
 	customToolNameToSdk?: Map<string, string>,
 	modelId?: string,
+	sessionSlot: ProviderSessionSlot<SessionState> = providerSessions.primary,
 ): SyncResult {
 	const priorMessages = messages.slice(0, -1); // everything before the new user prompt
 
@@ -557,26 +562,26 @@ function syncSharedSession(
 	// pi-side history rewrites such as /compact and session_tree: without it,
 	// missed = [].slice(cursor) can falsely hit REUSE and resume an unrelated
 	// longer CC session. See issue #25.
-	if (sharedSession && !sharedSession.needsRebuild && priorMessages.length >= sharedSession.cursor) {
-		const missed = priorMessages.slice(sharedSession.cursor);
+	if (sessionSlot.current && !sessionSlot.current.needsRebuild && priorMessages.length >= sessionSlot.current.cursor) {
+		const missed = priorMessages.slice(sessionSlot.current.cursor);
 		const trailingAssistantOnly =
 			missed.length === 1 && (missed[0] as { role?: string }).role === "assistant";
 		if (missed.length === 0 || trailingAssistantOnly) {
 			if (trailingAssistantOnly) {
-				sharedSession = { ...sharedSession, cursor: priorMessages.length, cwd };
+				sessionSlot.current = { ...sessionSlot.current, cursor: priorMessages.length, cwd };
 			}
-			debug(`Case 3: ${trailingAssistantOnly ? "advanced cursor past trailing assistant, " : ""}resuming session ${sharedSession.sessionId.slice(0, 8)}, cursor=${sharedSession.cursor}`);
-			debug(`syncResult: path=reuse sessionId=${sharedSession.sessionId} cursor=${sharedSession.cursor}`);
-			return { sessionId: sharedSession.sessionId };
+			debug(`Case 3: ${trailingAssistantOnly ? "advanced cursor past trailing assistant, " : ""}resuming session ${sessionSlot.current.sessionId.slice(0, 8)}, cursor=${sessionSlot.current.cursor}`);
+			debug(`syncResult: path=reuse sessionId=${sessionSlot.current.sessionId} cursor=${sessionSlot.current.cursor}`);
+			return { sessionId: sessionSlot.current.sessionId };
 		}
 	}
 	// Only reachable when needsRebuild is false — user-facing history rewrites
 	// (/compact, session_tree, /new, fork) always set needsRebuild or clear
-	// sharedSession before the next syncSharedSession call. In practice this
+	// sessionSlot.current before the next syncSharedSession call. In practice this
 	// fires only for isolated compact-summary subprocesses.
-	if (sharedSession && !sharedSession.needsRebuild && priorMessages.length < sharedSession.cursor) {
-		debug(`Case 1 synthetic: clean start for shorter context, preserving shared session ${sharedSession.sessionId.slice(0, 8)}, cursor=${sharedSession.cursor}`);
-		debug(`syncResult: path=clean-start preserve-shared sessionId=${sharedSession.sessionId} cursor=${sharedSession.cursor}`);
+	if (sessionSlot.current && !sessionSlot.current.needsRebuild && priorMessages.length < sessionSlot.current.cursor) {
+		debug(`Case 1 synthetic: clean start for shorter context, preserving shared session ${sessionSlot.current.sessionId.slice(0, 8)}, cursor=${sessionSlot.current.cursor}`);
+		debug(`syncResult: path=clean-start preserve-shared sessionId=${sessionSlot.current.sessionId} cursor=${sessionSlot.current.cursor}`);
 		return { sessionId: null, preserveSharedSession: true };
 	}
 
@@ -586,13 +591,13 @@ function syncSharedSession(
 		debug(`syncResult: path=clean-start`);
 		return { sessionId: null };
 	}
-	const previousSessionId = sharedSession?.sessionId;
-	const previousCursor = sharedSession?.cursor ?? 0;
+	const previousSessionId = sessionSlot.current?.sessionId;
+	const previousCursor = sessionSlot.current?.cursor ?? 0;
 	// preserveId: rebuild in place (deleteSession + createSession with the
 	// existing UUID), so prompt-cache UUIDs stay stable for log correlation
 	// and for any tools that key off them. Skipped only when there's a
 	// concurrent writer we shouldn't race — see forceRotate docs above.
-	const preserveId = previousSessionId !== undefined && !sharedSession?.forceRotate;
+	const preserveId = previousSessionId !== undefined && !sessionSlot.current?.forceRotate;
 	if (preserveId) {
 		// Wipe prior jsonl + companion dir (no-op if nothing to wipe).
 		deleteSession(previousSessionId!, cwd, process.env.CLAUDE_CONFIG_DIR);
@@ -606,7 +611,7 @@ function syncSharedSession(
 	convertAndImportMessages(session, priorMessages, customToolNameToSdk);
 	session.save();
 	verifyWrittenSession(session.jsonlPath, session.sessionId, session.messages.length, cwd);
-	sharedSession = { sessionId: session.sessionId, cursor: priorMessages.length, cwd };
+	sessionSlot.current = { sessionId: session.sessionId, cursor: priorMessages.length, cwd };
 	if (previousSessionId === undefined) {
 		debug(`Case 2: first turn with ${priorMessages.length} prior messages → session ${session.sessionId.slice(0, 8)}, ${session.messages.length} records`);
 	} else if (preserveId) {
@@ -623,13 +628,13 @@ function syncSharedSession(
 // @internal
 export const __test = {
 	resetSharedSession() {
-		sharedSession = null;
+		providerSessions.reset();
 	},
 	setSharedSession(state: SessionState | null) {
-		sharedSession = state;
+		providerSessions.primary.current = state;
 	},
 	getSharedSession() {
-		return sharedSession;
+		return providerSessions.primary.current;
 	},
 	/** Resolves the exact registry the provider callback would use right now. */
 	promptCaptures,
@@ -1149,6 +1154,11 @@ async function consumeQuery(
  *  Two cases: tool result delivery (active query) or fresh query. */
 function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
 	const stream = createHostAssistantMessageEventStream();
+	// OMP constructs native advisor prompts outside before_agent_start. Advisors
+	// are identified by both their dedicated tool and OMP's advisor prompt,
+	// then isolated using the provider session ID assigned by OMP.
+	const nativeAdvisor = isNativeAdvisorContext(context);
+	const sessionSlot = providerSessions.forRequest(nativeAdvisor, options?.sessionId);
 
 	// DEBUG: trace followUp message triggering
 	const lastMsgRole = context.messages[context.messages.length - 1]?.role;
@@ -1208,7 +1218,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			}
 		}
 
-		if (sharedSession) sharedSession.cursor = context.messages.length;
+		if (sessionSlot.current) sessionSlot.current.cursor = context.messages.length;
 		resultCtx.latestCursor = Math.max(resultCtx.latestCursor, context.messages.length);
 		return stream;
 	}
@@ -1219,7 +1229,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const lastMsg = context.messages[context.messages.length - 1];
 	if (lastMsg?.role === "toolResult") {
 		debug(`provider: orphaned tool result after abort, emitting end_turn`);
-		if (sharedSession) sharedSession.cursor = context.messages.length;
+		if (sessionSlot.current) sessionSlot.current.cursor = context.messages.length;
 		const c = ctx();  // capture current context for the microtask
 		queueMicrotask(() => {
 			c.resetTurnState(model);
@@ -1249,7 +1259,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 
 	const { mcpTools, customToolNameToSdk, customToolNameToPi } = resolveMcpTools(context, askClaudeToolName);
 	const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
-	const syncResult = syncSharedSession(context.messages, cwd, customToolNameToSdk, model.id);
+	const syncResult = syncSharedSession(context.messages, cwd, customToolNameToSdk, model.id, sessionSlot);
 	const { sessionId: resumeSessionId } = syncResult;
 	const promptBlocks = extractUserPromptBlocks(context.messages);
 	let promptText = extractUserPrompt(context.messages) ?? "";
@@ -1263,7 +1273,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			isReentrant,
 			activeQueryContexts: activeQueryContexts.size,
 			activeQueryExists: queryCtx.activeQuery !== null,
-			sharedSession: sharedSession ? { sessionId: sharedSession.sessionId.slice(0, 8), cursor: sharedSession.cursor } : null,
+			sharedSession: sessionSlot.current ? { sessionId: sessionSlot.current.sessionId.slice(0, 8), cursor: sessionSlot.current.cursor } : null,
 			messageRoles: context.messages.map((m, i) => `[${i}]${m.role}`).join(" "),
 		});
 		// Recover: use a continuation prompt so the SDK doesn't send an empty text block
@@ -1293,6 +1303,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 				{
 					cwd: options?.cwd,
 					initiatorOverride: options?.initiatorOverride,
+					nativeAdvisor,
 				},
 			);
 		} catch (err) {
@@ -1322,7 +1333,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		debug(
 			"provider: uncaptured side request; forwarding system prompt verbatim",
 			`len=${promptTransport.systemPrompt?.length ?? 0}`,
-			`cwd=${options?.cwd ?? "<none>"} initiator=${options?.initiatorOverride ?? "<none>"}`,
+			`cwd=${options?.cwd ?? "<none>"} initiator=${options?.initiatorOverride ?? "<none>"} nativeAdvisor=${nativeAdvisor}`,
 		);
 	} else {
 		debug(
@@ -1434,9 +1445,9 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 
 			// --- Abort detection in normal completion path ---
 			if (wasAborted || options?.signal?.aborted) {
-				if (sharedSession) sharedSession = { ...sharedSession, needsRebuild: true, forceRotate: true };
+				if (sessionSlot.current) sessionSlot.current = { ...sessionSlot.current, needsRebuild: true, forceRotate: true };
 				queryCtx.deferredUserMessages = [];
-				debug(`provider: abort detected, marked sharedSession needsRebuild + forceRotate`);
+				debug(`provider: abort detected, marked sessionSlot.current needsRebuild + forceRotate`);
 				if (queryCtx.turnOutput) {
 					queryCtx.turnOutput.stopReason = "aborted";
 					queryCtx.turnOutput.errorMessage = "Operation aborted";
@@ -1450,17 +1461,17 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			}
 
 			// --- Capture session ID ---
-			const sessionId = capturedSessionId ?? sharedSession?.sessionId;
+			const sessionId = capturedSessionId ?? sessionSlot.current?.sessionId;
 			if (syncResult.preserveSharedSession) {
-				if (capturedSessionId && capturedSessionId !== sharedSession?.sessionId) {
+				if (capturedSessionId && capturedSessionId !== sessionSlot.current?.sessionId) {
 					deleteSession(capturedSessionId, cwd, process.env.CLAUDE_CONFIG_DIR);
 					debug(`provider: query done, deleted ephemeral session ${capturedSessionId.slice(0, 8)} to preserve shared session`);
 				}
 				debug(`provider: query done, ignoring captured session ${capturedSessionId?.slice(0, 8) ?? "none"} to preserve shared session`);
 			} else if (sessionId) {
-				const cursor = Math.max(context.messages.length, queryCtx.latestCursor, sharedSession?.cursor ?? 0);
+				const cursor = Math.max(context.messages.length, queryCtx.latestCursor, sessionSlot.current?.cursor ?? 0);
 				debug(`provider: query done, session=${sessionId.slice(0, 8)}, cursor=${cursor}`);
-				sharedSession = { sessionId, cursor, cwd };
+				sessionSlot.current = { sessionId, cursor, cwd };
 			}
 
 			// --- Replay deferred user messages as continuation queries ---
@@ -1470,7 +1481,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 					debug(`provider: replaying deferred user message: ${steerPrompt.slice(0, 60)}`);
 					queryCtx.resetTurnState(model);
 
-					const resumeId = sharedSession?.sessionId;
+					const resumeId = sessionSlot.current?.sessionId;
 					if (!resumeId) {
 						debug(`WARNING: no session to resume for deferred message, dropping`);
 						break;
@@ -1484,9 +1495,9 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 
 					try {
 						const { capturedSessionId: contSid } = await consumeQuery(contQuery, customToolNameToPi, model, () => wasAborted, queryCtx);
-						const sid = contSid ?? sharedSession?.sessionId;
+						const sid = contSid ?? sessionSlot.current?.sessionId;
 						if (sid) {
-							sharedSession = { sessionId: sid, cursor: sharedSession?.cursor ?? 0, cwd };
+							sessionSlot.current = { sessionId: sid, cursor: sessionSlot.current?.cursor ?? 0, cwd };
 						}
 					} catch (contError) {
 						debug(`provider: continuation query error:`, contError);
@@ -1507,10 +1518,10 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		})
 		.catch((error) => {
 			debug(`provider: query error, model=${cliModel}, aborted=${Boolean(options?.signal?.aborted)}, error=`, error);
-			if ((wasAborted || options?.signal?.aborted) && sharedSession) {
-				sharedSession = { ...sharedSession, needsRebuild: true, forceRotate: true };
+			if ((wasAborted || options?.signal?.aborted) && sessionSlot.current) {
+				sessionSlot.current = { ...sessionSlot.current, needsRebuild: true, forceRotate: true };
 			} else {
-				sharedSession = null;
+				sessionSlot.current = null;
 			}
 			queryCtx.deferredUserMessages = [];
 			if (queryCtx.turnOutput) {
@@ -1572,14 +1583,14 @@ async function promptAndWait(
 
 	// Session resume for shared mode — reuse provider's session if it exists,
 	// otherwise create one from pi's context.
-	// Note: doesn't update sharedSession.cursor after completion, so the next
+	// Note: doesn't update providerSessions.primary.current.cursor after completion, so the next
 	// provider call will see missed messages and trigger a Case 4 rebuild.
 	let resumeSessionId: string | null = null;
 	if (!options?.isolated && options?.context?.length) {
-		if (sharedSession) {
+		if (providerSessions.primary.current) {
 			// Provider already has a session — just resume from it
 			// Any missed messages from other providers were already handled by the provider's Case 4
-			resumeSessionId = sharedSession.sessionId;
+			resumeSessionId = providerSessions.primary.current.sessionId;
 		} else {
 			// No provider session yet — create one from pi's context
 			const contextWithPrompt = [...options.context, { role: "user" as const, content: prompt, timestamp: Date.now() }];
@@ -1746,8 +1757,8 @@ export function registerBridge(pi: ExtensionAPI, models: BridgeModel[], configOv
 	// provider stream ownership. Child sessions must keep using the parent's
 	// stateful streamSimple for their entire lifetime.
 	const resetSharedSession = (event: string) => {
-		debug(`${event}: clearing session ${sharedSession?.sessionId?.slice(0, 8) ?? "none"}`);
-		sharedSession = null;
+		debug(`${event}: clearing session ${providerSessions.primary.current?.sessionId?.slice(0, 8) ?? "none"}`);
+		providerSessions.reset();
 	};
 	pi.on("session_start", (_event, ctx) => {
 		piUI = ctx.ui;
@@ -1799,9 +1810,9 @@ export function registerBridge(pi: ExtensionAPI, models: BridgeModel[], configOv
 	// triggers CC's autocompact-thrashing guard (issue #8). Force the next
 	// call down the REBUILD path so CC sees the current history.
 	const markRebuild = (event: string) => {
-		if (sharedSession) {
-			debug(`${event}: marking needsRebuild on session ${sharedSession.sessionId.slice(0, 8)}`);
-			sharedSession = { ...sharedSession, needsRebuild: true };
+		if (providerSessions.primary.current) {
+			debug(`${event}: marking needsRebuild on session ${providerSessions.primary.current.sessionId.slice(0, 8)}`);
+			providerSessions.primary.current = { ...providerSessions.primary.current, needsRebuild: true };
 		}
 	};
 	pi.on("session_compact", (event) => markRebuild(`session_compact:fromExtension=${event.fromExtension}`));

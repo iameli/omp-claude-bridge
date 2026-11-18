@@ -3,6 +3,8 @@ import { PromptCaptures, projectPromptCapture } from "./prompt-capture.js";
 export interface PromptTransportOptions {
 	cwd?: string;
 	initiatorOverride?: string;
+	/** OMP advisor Agent bypasses before_agent_start but has an authoritative prompt. */
+	nativeAdvisor?: boolean;
 }
 
 export type ProviderPromptTransport =
@@ -45,6 +47,12 @@ export function resolveProviderPromptTransport(
 	systemPrompt: string | undefined,
 	options?: PromptTransportOptions,
 ): ProviderPromptTransport {
+	// Native OMP advisors are full Agents with cwd, but their prompt is built
+	// directly by AdvisorController and never enters before_agent_start. The
+	// caller must verify both the dedicated advise tool and built-in prompt.
+	if (options?.nativeAdvisor) {
+		return { mode: "verbatim-side-request", systemPrompt: systemPrompt || undefined };
+	}
 	const isSideRequest = options?.cwd === undefined || options?.initiatorOverride === "agent";
 
 	if (isSideRequest) {
