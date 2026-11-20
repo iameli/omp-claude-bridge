@@ -1,4 +1,4 @@
-/** Isolate native OMP advisor conversations from the main Claude Code session. */
+/** Isolate advisor conversations and one-shot requests from the main Claude Code session. */
 export interface ProviderSessionSlot<T> {
 	current: T | null;
 }
@@ -8,8 +8,12 @@ export class ProviderSessionScopes<T> {
 	readonly primary: ProviderSessionSlot<T> = { current: null };
 	readonly #advisors = new Map<string, ProviderSessionSlot<T>>();
 
-	forRequest(nativeAdvisor: boolean, sessionId?: string): ProviderSessionSlot<T> {
-		if (!nativeAdvisor) return this.primary;
+	forRequest(nativeAdvisor: boolean, sessionId?: string, initiatorOverride?: string): ProviderSessionSlot<T> {
+		if (!nativeAdvisor) {
+			// OMP gives side requests such as background handoff a distinct, one-shot ID.
+			if (initiatorOverride === "agent" && sessionId?.includes(":side:")) return { current: null };
+			return this.primary;
+		}
 		if (!sessionId?.trim()) {
 			throw new Error("Claude bridge: OMP native advisor must provide a distinct provider sessionId");
 		}

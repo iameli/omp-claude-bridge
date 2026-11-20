@@ -2,15 +2,19 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import * as codingAgent from "@oh-my-pi/pi-coding-agent";
+import { AdviseTool } from "@oh-my-pi/pi-coding-agent/advisor/advise-tool";
+import { AdvisorEmissionGuard } from "@oh-my-pi/pi-coding-agent/advisor/emission-guard";
 import * as typebox from "@oh-my-pi/pi-coding-agent/extensibility/legacy-typebox";
+import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { __test, registerBridge, registerBridgeFromHost } from "../src/index.ts";
 import { buildModels } from "../src/models.ts";
+import { isNativeAdvisorContext } from "../src/native-advisor.ts";
 import {
 	compactWithCompleteImpl,
 	projectAskClaudeContext,
 	stringEnum,
 } from "../src/omp-18-compat.ts";
-import { PROMPT_CAPTURES_KEY } from "../src/prompt-capture.ts";
+import { PROMPT_CAPTURES_KEY, PromptCaptures, deriveCaptureInput, projectPromptCapture } from "../src/prompt-capture.ts";
 import { resolveProviderPromptTransport } from "../src/prompt-transport.ts";
 import { defaultHarnessBlock } from "./fixtures/omp-system-prompts.mjs";
 
@@ -57,7 +61,7 @@ function fakeExtensionApi() {
 	};
 }
 
-test("OMP 18.2.8 injected surfaces register the provider and AskClaude renderer/schema", async () => {
+test("injected OMP surfaces register the provider and AskClaude renderer/schema", async () => {
 	const fake = fakeExtensionApi();
 	const models = buildModels([
 		catalogModel("claude-opus-5"),
@@ -150,6 +154,20 @@ test("compaction takeover preserves the custom completeImpl call shape", async (
 	assert.equal(args[5].completeImpl, completeImpl);
 });
 
+test("OMP's handoff strategy keeps the native summarizer", async () => {
+	const fake = fakeExtensionApi();
+	registerBridge(fake.api, buildModels([catalogModel("claude-opus-5")]), {});
+	try {
+		const [beforeCompact] = fake.handlers.get("session_before_compact");
+		const result = await beforeCompact({
+			preparation: { settings: { strategy: "handoff" } },
+		}, { model: { baseUrl: "claude-bridge" } });
+		assert.equal(result, undefined);
+	} finally {
+		for (const handler of fake.handlers.get("session_shutdown") ?? []) await handler({});
+	}
+});
+
 test("AskClaude session projection uses the host buildSessionContext result exactly", () => {
 	const branch = [{ type: "message", id: "entry" }];
 	const messages = [{ role: "user", content: "hello" }];
@@ -184,9 +202,52 @@ test("runtime host imports stay on the canonical OMP compatibility boundary", ()
 		"@oh-my-pi/pi-tui",
 		"@oh-my-pi/pi-utils",
 	]) {
-		assert.equal(pkg.devDependencies[name], "18.2.8", name);
+		assert.match(pkg.devDependencies[name], /^\d+\.\d+\.\d+$/, name);
+		assert.equal(pkg.devDependencies[name], pkg.devDependencies["@oh-my-pi/pi-coding-agent"], name);
 		assert.equal(pkg.dependencies[name], undefined, `${name} must not be a runtime dependency`);
 	}
+});
+
+for (const [layout, override] of [
+	["default", {}],
+	["literal", { resolvedCustomPrompt: "CUSTOM-POLICY" }],
+	["template", { systemPromptTemplate: "CUSTOM-POLICY" }],
+]) {
+	test(`real OMP ${layout} prompt preserves context and append exactly once`, async () => {
+		const cwd = process.cwd();
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd,
+			contextFiles: [{ path: `${cwd}/AGENTS.md`, content: "PROJECT-POLICY" }],
+			resolvedAppendSystemPrompt: "APPEND-POLICY",
+			skills: [{ name: "bridge", description: "SKILL-POLICY", filePath: `${cwd}/SKILL.md`, baseDir: cwd, source: "project" }],
+			alwaysApplyRules: [{ name: "always", path: `${cwd}/always.md`, content: "GENERIC-POLICY" }],
+			rules: [{ name: "domain", description: "DOMAIN-POLICY", path: `${cwd}/domain.md`, globs: ["src/**"] }],
+			...override,
+		});
+		const input = deriveCaptureInput(systemPrompt);
+		const projected = projectPromptCapture({ ...input, assembledPrompt: systemPrompt.join("\n\n"), inherited: [] });
+		const sentinels = ["PROJECT-POLICY", "APPEND-POLICY"];
+		if (layout === "default") {
+			assert.equal(input.custom, undefined);
+			sentinels.push("SKILL-POLICY", "GENERIC-POLICY", "DOMAIN-POLICY");
+		} else {
+			sentinels.push("CUSTOM-POLICY");
+		}
+		assert.ok(projected);
+		for (const sentinel of sentinels) assert.equal(projected.split(sentinel).length - 1, 1, sentinel);
+	});
+}
+
+test("the OMP host's bundled advisor prompt and advise tool select verbatim transport", () => {
+	const hostEntry = import.meta.resolve("@oh-my-pi/pi-coding-agent");
+	const systemPrompt = readFileSync(new URL("./prompts/advisor/system.md", hostEntry), "utf8");
+	const advise = new AdviseTool(() => {}, new AdvisorEmissionGuard({ budgetPerUpdate: 1 }));
+	const context = { systemPrompt: [systemPrompt, "WATCHDOG-POLICY"], tools: [advise] };
+	const nativeAdvisor = isNativeAdvisorContext(context);
+	assert.equal(nativeAdvisor, true);
+	assert.deepEqual(resolveProviderPromptTransport(new PromptCaptures(), context.systemPrompt.join("\n\n"), {
+		cwd: process.cwd(), nativeAdvisor,
+	}), { mode: "verbatim-side-request", systemPrompt: context.systemPrompt.join("\n\n") });
 });
 
 test("a subagent session shutdown leaves the parent's prompt capture usable", async () => {

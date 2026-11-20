@@ -8,6 +8,8 @@
  */
 const NATIVE_ADVISOR_PROMPT_PREFIX =
 	"User, code-quality, robustness advocate; peer-shadow main agent.";
+const ADVISOR_CONVENTIONS_PREFIX =
+	/^<conventions>\nRFC 2119(?: keywords)?: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL\. `NEVER`=`MUST NOT`; `AVOID`=`SHOULD NOT`\.\n<\/conventions>\n\n/;
 
 export function isNativeAdvisorContext(context: {
 	readonly systemPrompt?: string | readonly string[];
@@ -17,5 +19,7 @@ export function isNativeAdvisorContext(context: {
 	const prompt = Array.isArray(context.systemPrompt)
 		? context.systemPrompt.join("\n\n")
 		: context.systemPrompt;
-	return typeof prompt === "string" && prompt.trimStart().startsWith(NATIVE_ADVISOR_PROMPT_PREFIX);
+	if (typeof prompt !== "string") return false;
+	const start = prompt.trimStart().replace(ADVISOR_CONVENTIONS_PREFIX, "");
+	return start.startsWith(NATIVE_ADVISOR_PROMPT_PREFIX);
 }
