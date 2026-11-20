@@ -183,9 +183,11 @@ test("current Anthropic catalogue families, including Mythos, are discovered wit
 		assert.ok(!/\d{4,}/.test(id), `snapshot id leaked: ${id}`);
 	}
 
-	assert.equal(resolveModel(models, "fable").id, "claude-fable-5-1");
-	assert.equal(resolveModel(models, "mythos").id, "claude-mythos-5-1");
-	assert.equal(resolveModel(models, "opus").id, "claude-opus-5");
+	const byVersion = new Intl.Collator("en", { numeric: true });
+	for (const family of ["fable", "mythos", "opus"]) {
+		const newest = ids.filter((id) => id.startsWith(`claude-${family}-`)).sort(byVersion.compare).at(-1);
+		assert.equal(resolveModel(models, family).id, newest, family);
+	}
 
 	// Discovery preserves catalogue metadata verbatim; the registered window is
 	// that same catalogue capacity (see buildRegisteredModels).

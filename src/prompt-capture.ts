@@ -487,40 +487,43 @@ export const SUBAGENT_BLOCK_MARKER = "You are operating on a piece of work assig
 // carries an equivalent base harness, so block 0 of a default-layout prompt must
 // be recognized and dropped rather than forwarded as portable custom text.
 //
-// Upstream reshaped the opening of that template twice, so recognition is a small
-// table of generations instead of one marker (verified against can1357/oh-my-pi):
-// - v18.2.7 and later (checked at v18.2.7, v18.2.8): no wrapper element; the RFC
-//   2119 line opens the block and the role sentence gained "You are a".
-// - v18.1.21 … v18.2.6 (checked at v18.2.2, v18.2.6): a `<conventions>` wrapper
-//   precedes the RFC 2119 line, role sentence "Helpful, trusted assistant for
-//   load-bearing changes …".
-// Releases up to v18.1.20 opened with `<system-conventions>`; that generation is
-// not recognized here and never was.
+// Match the known opening and ordered section spine for each rendered layout.
+// The recent 18.x template uses ⁂ headings, and 19.0 puts the role in the
+// opening line. Earlier 18.x templates use § headings and a role section.
 interface DefaultHarnessGeneration {
-	/** Exact opening bytes of the rendered block. */
 	opening: string;
-	/** Exact sentence rendered under the `§ Role` heading. */
-	role: string;
+	sectionMarker: "§" | "⁂";
+	roleHeading?: string;
 }
 
+const RFC_HARNESS_OPENING = "RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.";
+const MODERN_HARNESS_ROLE = "You are omp's trusted coding assistant.";
 const DEFAULT_HARNESS_GENERATIONS: readonly DefaultHarnessGeneration[] = [
 	{
-		opening: "RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.",
-		role: "You are a helpful, trusted assistant working in Oh My Pi coding harness.",
+		opening: `${MODERN_HARNESS_ROLE}\n`,
+		sectionMarker: "⁂",
 	},
 	{
-		opening: "<conventions>\nRFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.",
-		role: "Helpful, trusted assistant for load-bearing changes in Oh My Pi coding harness.",
+		opening: "RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.",
+		sectionMarker: "⁂",
+		roleHeading: `\n⁂ Role\n${MODERN_HARNESS_ROLE}\n`,
+	},
+	{
+		opening: RFC_HARNESS_OPENING,
+		sectionMarker: "§",
+		roleHeading: "\n§ Role\nYou are a helpful, trusted assistant working in Oh My Pi coding harness.\n",
+	},
+	{
+		opening: `<conventions>\n${RFC_HARNESS_OPENING}`,
+		sectionMarker: "§",
+		roleHeading: "\n§ Role\nHelpful, trusted assistant for load-bearing changes in Oh My Pi coding harness.\n",
 	},
 ];
 
-/** The `§` sections every supported generation renders unconditionally, in
- *  template order. Unchanged since v17.2.15 — far more stable than the opening
- *  and role lines above — which is why the structural verdict rests on them.
- *  `§ Scratchpad` is excluded: it is gated on the `think` tool, so including it
- *  would make the verdict depend on an agent's tool set. */
-const DEFAULT_HARNESS_SECTIONS = ["\n§ Runtime\n", "\n§ Tool Policy\n", "\n§ Workflow\n", "\n§ Delivery\n", "\n§ Critical\n"];
+// Scratchpad is conditional on the tool set. These sections always render.
+const DEFAULT_HARNESS_SECTIONS = ["Runtime", "Tool Policy", "Workflow", "Delivery", "Critical"];
 
+const MODERN_SKILLS_MARKER = "Matching skill → MUST read skill://<name> first.";
 const DEFAULT_SKILLS_MARKER = "Matching skill → MUST read `skill://<name>` first.";
 const CUSTOM_SKILLS_MARKER = "Skills are specialized knowledge. Scan descriptions for your task domain.";
 const LEGACY_SKILLS_MARKER = "The following skills provide specialized instructions for specific tasks.";
@@ -528,7 +531,6 @@ const GENERIC_RULES_OPEN = "<generic-rules>";
 const GENERIC_RULES_CLOSE = "</generic-rules>";
 const DOMAIN_RULES_OPEN = "<domain-rules>";
 const DOMAIN_RULES_CLOSE = "</domain-rules>";
-const PROJECT_BLOCK_PREFIX = "PROJECT";
 const PROJECT_CRITICAL_MARKER = "<critical>\n- Each response MUST advance the task; completion only stopping condition.";
 
 function compactJoin(parts: Array<string | undefined>): string | undefined {
@@ -541,9 +543,8 @@ function compactJoin(parts: Array<string | undefined>): string | undefined {
  * Deliberately over-specified. A false positive silently drops a user's real
  * custom prompt; a false negative only duplicates a harness, which is loud. A
  * block therefore qualifies only when it opens with a known generation's exact
- * first bytes, carries that generation's exact `§ Role` sentence, and then holds
- * every unconditional `§` section in template order. Prose that merely quotes one
- * OMP sentence never satisfies all three.
+ * first bytes, carries its exact role heading if the role is not in the opening,
+ * and holds every unconditional section in template order.
  *
  * The remaining reachable false positive is a SYSTEM.md / template override that
  * copies the bundled harness and edits it, so a block rendered from
@@ -557,36 +558,19 @@ function isDefaultHarnessBlock(block: string | undefined): boolean {
 	if (!text) return false;
 	if (text.includes(CUSTOM_SKILLS_MARKER) || findGeneratedCustomProject(text)) return false;
 
-	const role = DEFAULT_HARNESS_GENERATIONS.find(
-		(generation) => text.startsWith(generation.opening) && text.includes(`\n§ Role\n${generation.role}\n`),
-	)?.role;
-	if (!role) return false;
+	const generation = DEFAULT_HARNESS_GENERATIONS.find(({ opening, roleHeading }) =>
+		text.startsWith(opening) && (!roleHeading || text.includes(roleHeading)),
+	);
+	if (!generation) return false;
 
-	let cursor = text.indexOf(`\n§ Role\n${role}\n`);
+	let cursor = generation.roleHeading ? text.indexOf(generation.roleHeading) : 0;
 	for (const section of DEFAULT_HARNESS_SECTIONS) {
-		const at = text.indexOf(section, cursor);
+		const heading = `\n${generation.sectionMarker} ${section}\n`;
+		const at = text.indexOf(heading, cursor);
 		if (at === -1) return false;
-		cursor = at + section.length;
+		cursor = at + heading.length;
 	}
 	return true;
-}
-
-/** OMP's generated project/environment footer.
- *
- * Two upstream invariants keep a user-authored block from impersonating it,
- * which matters because the footer's tail is where the append is read from:
- * - it is never block 0. v18.2.8 `system-prompt.ts` builds the array as
- *   `const systemPrompt = [rendered]` and only then pushes the footer, so index
- *   0 is always the rendered custom/template/harness block;
- * - it always renders project-prompt.md's unconditional `<critical>` block.
- * A SYSTEM.md that opens with a `PROJECT` heading and quotes that block would
- * otherwise shadow the real footer and get its own trailing text projected as
- * an append on top of the copy already inside `custom`.
- */
-function findProjectBlock(assembled: string[]): string | undefined {
-	return assembled
-		.slice(1)
-		.find((part) => part.trimStart().startsWith(`${PROJECT_BLOCK_PREFIX}\n`) && part.includes(PROJECT_CRITICAL_MARKER));
 }
 
 function removeRange(source: string, start: number, end: number): string {
@@ -651,7 +635,7 @@ export function extractRenderedContextFiles(assembled: string[]): Array<{ path: 
 }
 
 function extractSkillsFromBlock(block: string): string | undefined {
-	for (const marker of [DEFAULT_SKILLS_MARKER, CUSTOM_SKILLS_MARKER, LEGACY_SKILLS_MARKER]) {
+	for (const marker of [MODERN_SKILLS_MARKER, DEFAULT_SKILLS_MARKER, CUSTOM_SKILLS_MARKER, LEGACY_SKILLS_MARKER]) {
 		const start = block.lastIndexOf(marker);
 		if (start === -1) continue;
 		const closeTag = marker === LEGACY_SKILLS_MARKER ? "</available_skills>" : "</skills>";
@@ -680,7 +664,7 @@ export function extractRenderedRuleBlocks(assembled: string[]): CapturedRuleBloc
 	const seenIds = new Set<string>();
 
 	for (const block of assembled) {
-		const runtimeStart = block.indexOf("\n§ Runtime\n");
+		const runtimeStart = block.search(/\n[§⁂] Runtime\n/);
 		if (runtimeStart === -1) continue;
 		const rulesHeading = block.indexOf("# Skills & Rules", runtimeStart);
 		if (rulesHeading === -1) continue;
@@ -741,33 +725,24 @@ export function extractSubagentBlock(assembled: string[]): string | undefined {
 	return block ? block.trim() : undefined;
 }
 
-/** The append text OMP rendered into the PROJECT footer, if any.
- *
- * project-prompt.md ends its generated content at the stable </critical> block
- * and renders `appendPrompt` immediately afterwards, so the footer tail answers
- * the only question that matters here: did THIS assembly put an append in the
- * PROJECT block? That is a property of the rendered output, so no customization
- * route or OMP version is inferred. It does still recognize project-prompt.md's
- * rendered bytes: should upstream reword the generated <critical> block, this
- * returns undefined and the append is lost again. That marker has been stable
- * across the supported generations and is already the anchor the default layout
- * depended on, so the fix adds no new brittleness — but it is not marker-free.
- *
- * OMP v18.2.8 `system-prompt.ts` renders the footer with
- * `{ ...data, contextFiles: [], appendPrompt: "" }` whenever a literal custom
- * prompt is in play, so on the plain SYSTEM.md / --system-prompt route this
- * tail is empty and the function correctly reports no append.
+/** Read the append after the generated critical block in either footer layout.
+ * Skip block zero, which can contain user-authored text that quotes the footer.
+ * The modern layout puts the critical block after the project-context wrapper.
  */
 export function extractProjectAppendBlock(assembled: string[]): string | undefined {
-	const project = findProjectBlock(assembled);
-	if (!project) return undefined;
-	const generatedStart = project.indexOf(PROJECT_CRITICAL_MARKER);
-	if (generatedStart === -1) return undefined;
-	const marker = "</critical>";
-	const boundary = project.indexOf(marker, generatedStart + PROJECT_CRITICAL_MARKER.length);
-	if (boundary === -1) return undefined;
-	const append = project.slice(boundary + marker.length).trim();
-	return append || undefined;
+	for (const block of assembled.slice(1)) {
+		const project = block.trimStart();
+		const marker = project.startsWith("<project-context>\n")
+			? `\n</project-context>\n\n${PROJECT_CRITICAL_MARKER}`
+			: PROJECT_CRITICAL_MARKER;
+		if (marker === PROJECT_CRITICAL_MARKER && !project.startsWith("PROJECT\n")) continue;
+		const generatedStart = project.indexOf(marker);
+		if (generatedStart === -1) continue;
+		const close = "</critical>";
+		const boundary = project.indexOf(close, generatedStart + marker.length);
+		if (boundary !== -1) return project.slice(boundary + close.length).trim() || undefined;
+	}
+	return undefined;
 }
 
 /**
@@ -814,18 +789,9 @@ export function deriveCaptureInput(assembled: string[]): PromptCaptureInput {
 
 	return {
 		custom: compactJoin([customPrompt, subagent]),
-		// Read the append from wherever OMP actually rendered it rather than
-		// inferring it from the presence of a custom block 0. The two are not
-		// equivalent: OMP folds appendPrompt into block 0 only on the literal
-		// custom routes (SYSTEM.md / --system-prompt), and blanks the footer's
-		// appendPrompt in exactly that case. A SYSTEM_TEMPLATE.md /
-		// --system-prompt-template render also produces a portable block 0, but
-		// keeps its append in the PROJECT footer — so the old
-		// `customPrompt ? undefined` guard silently dropped it.
-		//
-		// Asking the rendered footer keeps every route correct without sniffing
-		// which customization produced it: the plain-custom footer has no append
-		// to find, so this cannot duplicate the copy living inside `custom`.
+		// Older literal overrides put the append in block zero. Current OMP
+		// renders it in the footer even with a literal override. Read the actual
+		// footer tail so both placements work without inferring the host version.
 		append: extractProjectAppendBlock(assembled),
 		contextFiles,
 		skills: skillsBlock ? [{ id: "omp-skills", content: skillsBlock }] : [],
