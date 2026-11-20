@@ -1158,7 +1158,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// are identified by both their dedicated tool and OMP's advisor prompt,
 	// then isolated using the provider session ID assigned by OMP.
 	const nativeAdvisor = isNativeAdvisorContext(context);
-	const sessionSlot = providerSessions.forRequest(nativeAdvisor, options?.sessionId);
+	const sessionSlot = providerSessions.forRequest(nativeAdvisor, options?.sessionId, options?.initiatorOverride);
 
 	// DEBUG: trace followUp message triggering
 	const lastMsgRole = context.messages[context.messages.length - 1]?.role;
@@ -1776,6 +1776,8 @@ export function registerBridge(pi: ExtensionAPI, models: BridgeModel[], configOv
 
 	pi.on("session_before_compact", async (event, ctx) => {
 		if (ctx.model?.baseUrl !== "claude-bridge") return undefined;
+		// OMP 19 dispatches /handoff through this hook before generating its own handoff document.
+		if (event.preparation.settings.strategy === "handoff") return undefined;
 		debug(
 			`session_before_compact: takeover isSplitTurn=${event.preparation.isSplitTurn} ` +
 			`messages=${event.preparation.messagesToSummarize.length} turnPrefix=${event.preparation.turnPrefixMessages.length}`,

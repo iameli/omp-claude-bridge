@@ -154,6 +154,20 @@ test("compaction takeover preserves the custom completeImpl call shape", async (
 	assert.equal(args[5].completeImpl, completeImpl);
 });
 
+test("OMP's handoff strategy keeps the native summarizer", async () => {
+	const fake = fakeExtensionApi();
+	registerBridge(fake.api, buildModels([catalogModel("claude-opus-5")]), {});
+	try {
+		const [beforeCompact] = fake.handlers.get("session_before_compact");
+		const result = await beforeCompact({
+			preparation: { settings: { strategy: "handoff" } },
+		}, { model: { baseUrl: "claude-bridge" } });
+		assert.equal(result, undefined);
+	} finally {
+		for (const handler of fake.handlers.get("session_shutdown") ?? []) await handler({});
+	}
+});
+
 test("AskClaude session projection uses the host buildSessionContext result exactly", () => {
 	const branch = [{ type: "message", id: "entry" }];
 	const messages = [{ role: "user", content: "hello" }];

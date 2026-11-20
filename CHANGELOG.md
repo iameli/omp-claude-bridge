@@ -34,6 +34,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `<project-context>` footer, preserving repository context, rules, skills and
   append instructions. Native advisor recognition also accepts the conventions
   preamble used by OMP 18 without relaxing the required `advise` tool check.
+- OMP 19's native `/handoff` keeps its own summarization path. Its one-shot
+  Claude Code request uses a separate session slot while the primary turn runs.
 - User append instructions (`APPEND_SYSTEM.md` / `--append-system-prompt`) being
   silently dropped whenever OMP rendered block 0 from `SYSTEM_TEMPLATE.md` or
   `--system-prompt-template`. `deriveCaptureInput()` read the append from the

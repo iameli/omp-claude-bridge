@@ -35,3 +35,15 @@ test("unidentified advisor cannot fall back to and contaminate primary session",
 	assert.throws(() => scopes.forRequest(true, ""), /must provide a distinct/);
 	assert.equal(scopes.primary.current, null);
 });
+
+test("agent-attributed side requests such as handoff use a fresh session slot", () => {
+	const scopes = new ProviderSessionScopes();
+	scopes.primary.current = { sessionId: "cc-main", cursor: 12 };
+	const sideId = "omp-main:side:42";
+	const request = scopes.forRequest(false, sideId, "agent");
+	assert.equal(request.current, null);
+	request.current = { sessionId: "cc-handoff", cursor: 3 };
+	assert.equal(scopes.forRequest(false, sideId, "agent").current, null);
+	assert.equal(scopes.forRequest(false, sideId).current.sessionId, "cc-main");
+	assert.equal(scopes.forRequest(false, "omp-main", "agent").current.sessionId, "cc-main");
+});
