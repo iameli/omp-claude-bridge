@@ -16,7 +16,7 @@ test("uncaptured completeSimple-style request transports its system prompt verba
 	});
 
 	assert.deepEqual(result, {
-		mode: "verbatim-side-request",
+		mode: "verbatim",
 		systemPrompt: prompt,
 	});
 });
@@ -31,7 +31,7 @@ test("explicit agent-attributed side request is verbatim even when it carries cw
 	});
 
 	assert.deepEqual(result, {
-		mode: "verbatim-side-request",
+		mode: "verbatim",
 		systemPrompt: prompt,
 	});
 });
@@ -90,7 +90,7 @@ test("side request with no system prompt stays a bare utility completion", () =>
 	const captures = new PromptCaptures();
 
 	assert.deepEqual(resolveProviderPromptTransport(captures, undefined, {}), {
-		mode: "verbatim-side-request",
+		mode: "verbatim",
 		systemPrompt: undefined,
 	});
 });
@@ -103,7 +103,7 @@ test("OMP native advisor uses its own prompt verbatim despite cwd and no capture
 		cwd: "/repo",
 		nativeAdvisor: true,
 	});
-	assert.deepEqual(result, { mode: "verbatim-side-request", systemPrompt: prompt });
+	assert.deepEqual(result, { mode: "verbatim", systemPrompt: prompt });
 	assert.equal(captures.size, 1);
 });
 
@@ -113,5 +113,5 @@ test("OMP native advisor does not project even if its prompt matches an agent ca
 	const result = resolveProviderPromptTransport(captures, "ADVISOR-SYSTEM-PROMPT", {
 		cwd: "/repo", nativeAdvisor: true,
 	});
-	assert.deepEqual(result, { mode: "verbatim-side-request", systemPrompt: "ADVISOR-SYSTEM-PROMPT" });
+	assert.deepEqual(result, { mode: "verbatim", systemPrompt: "ADVISOR-SYSTEM-PROMPT" });
 });

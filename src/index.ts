@@ -1,5 +1,5 @@
 import type { AssistantMessage, AssistantMessageEventStream, Context, Model, SimpleStreamOptions, Tool, Usage } from "@oh-my-pi/pi-ai";
-import type { CompactionEntry, ExtensionAPI, ExtensionUIContext } from "@oh-my-pi/pi-coding-agent";
+import type { CompactionEntry, ExtensionAPI, ExtensionContext, ExtensionUIContext } from "@oh-my-pi/pi-coding-agent";
 import { createSdkMcpServer, query, type EffortLevel, type SDKMessage, type SDKSystemMessage, type SDKUserMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import type { Base64ImageSource, ContentBlockParam, MessageParam } from "@anthropic-ai/sdk/resources";
 import { createSession, deleteSession, repairToolPairing } from "cc-session-io";
@@ -1303,6 +1303,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 				{
 					cwd: options?.cwd,
 					initiatorOverride: options?.initiatorOverride,
+					sessionId: options?.sessionId,
 					nativeAdvisor,
 				},
 			);
@@ -1329,9 +1330,9 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	}
 	const systemPromptAppend =
 		promptTransport.mode === "agent-preset" ? promptTransport.append : undefined;
-	if (promptTransport.mode === "verbatim-side-request") {
+	if (promptTransport.mode === "verbatim") {
 		debug(
-			"provider: uncaptured side request; forwarding system prompt verbatim",
+			"provider: forwarding effective system prompt verbatim",
 			`len=${promptTransport.systemPrompt?.length ?? 0}`,
 			`cwd=${options?.cwd ?? "<none>"} initiator=${options?.initiatorOverride ?? "<none>"} nativeAdvisor=${nativeAdvisor}`,
 		);
@@ -1388,7 +1389,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		tools: [],
 		permissionMode: "bypassPermissions",
 		includePartialMessages: true,
-		systemPrompt: promptTransport.mode === "verbatim-side-request"
+		systemPrompt: promptTransport.mode === "verbatim"
 			? promptTransport.systemPrompt
 			: {
 					type: "preset", preset: "claude_code",
@@ -1760,13 +1761,26 @@ export function registerBridge(pi: ExtensionAPI, models: BridgeModel[], configOv
 		debug(`${event}: clearing session ${providerSessions.primary.current?.sessionId?.slice(0, 8) ?? "none"}`);
 		providerSessions.reset();
 	};
+	let releaseLivePrompt: (() => void) | undefined;
+	const bindLivePrompt = (ctx: ExtensionContext) => {
+		releaseLivePrompt?.();
+		releaseLivePrompt = promptCaptures().bindLivePrompt(ctx.sessionManager.getSessionId(), () => ctx.getSystemPrompt());
+	};
 	pi.on("session_start", (_event, ctx) => {
 		piUI = ctx.ui;
+		bindLivePrompt(ctx);
 		resetSharedSession("session_start");
 	});
-	pi.on("session_switch", (event) => resetSharedSession(`session_switch:${event.reason}`));
-	pi.on("session_branch", () => resetSharedSession("session_branch"));
+	pi.on("session_switch", (event, ctx) => {
+		bindLivePrompt(ctx);
+		resetSharedSession(`session_switch:${event.reason}`);
+	});
+	pi.on("session_branch", (_event, ctx) => {
+		bindLivePrompt(ctx);
+		resetSharedSession("session_branch");
+	});
 	pi.on("session_shutdown", () => {
+		releaseLivePrompt?.();
 		resetSharedSession("session_shutdown");
 		if (releaseSharedProvider()) {
 			releaseSharedPromptCaptures(promptCaptures());
