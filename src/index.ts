@@ -3,7 +3,7 @@ import type { CompactionEntry, ExtensionAPI, ExtensionContext, ExtensionUIContex
 import { createSdkMcpServer, query, type EffortLevel, type SDKMessage, type SDKSystemMessage, type SDKUserMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import type { Base64ImageSource, ContentBlockParam, MessageParam } from "@anthropic-ai/sdk/resources";
 import { createSession, deleteSession, repairToolPairing } from "cc-session-io";
-import { appendFileSync, mkdirSync, realpathSync, statSync } from "fs";
+import { mkdirSync, realpathSync, statSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
 import { PROVIDER_ID, messageContentToText, convertPiMessages } from "./convert.js";
@@ -13,6 +13,7 @@ import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
 import { QueryContext, ctx } from "./query-state.js";
 import { loadConfig, retiredProviderKeys, type Config } from "./config.js";
+import { appendBridgeLog } from "./logging.js";
 import { jsonSchemaToZodShape, type WireSchemaDegradationReport } from "./typebox-to-zod.js";
 import { ToolAvailabilityMonitor } from "./tool-availability.js";
 import { buildActionSummary, type ToolCallState } from "./askclaude-ui.js";
@@ -47,29 +48,21 @@ const DEBUG = process.env.CLAUDE_BRIDGE_DEBUG === "1";
 const DEBUG_LOG_PATH = process.env.CLAUDE_BRIDGE_DEBUG_PATH || join(homedir(), ".omp", "agent", "claude-bridge.log");
 const DIAG_LOG_PATH = join(homedir(), ".omp", "agent", "claude-bridge-diag.log");
 
-// Ensure log directories exist when debug is enabled
-if (DEBUG) {
-	try {
-		mkdirSync(dirname(DEBUG_LOG_PATH), { recursive: true });
-		mkdirSync(dirname(DIAG_LOG_PATH), { recursive: true });
-	} catch {
-		// If directory creation fails, debug functions will throw on first use
-	}
-}
-
 // Unique per module evaluation — confirms whether subagents share module state
 const moduleInstanceId = Math.random().toString(36).slice(2, 8);
 
 function debug(...args: unknown[]) {
 	if (!DEBUG) return;
-	const ts = new Date().toISOString();
-	const fmt = (a: unknown): string => {
-		if (typeof a === "string") return a;
-		if (a instanceof Error) return `${a.name}: ${a.message}${a.stack ? "\n" + a.stack : ""}`;
-		return JSON.stringify(a);
-	};
-	const msg = args.map(fmt).join(" ");
-	appendFileSync(DEBUG_LOG_PATH, `[${ts}] [${moduleInstanceId}] ${msg}\n`);
+	try {
+		const msg = args.map((arg) => {
+			if (typeof arg === "string") return arg;
+			if (arg instanceof Error) return `${arg.name}: ${arg.message}${arg.stack ? "\n" + arg.stack : ""}`;
+			return JSON.stringify(arg);
+		}).join(" ");
+		appendBridgeLog(DEBUG_LOG_PATH, `[${new Date().toISOString()}] [${moduleInstanceId}] ${msg}\n`);
+	} catch {
+		// Debug arguments may not be serializable.
+	}
 }
 
 // Per-query CLI debug capture. When CLAUDE_BRIDGE_DEBUG=1, ask the Claude Code
@@ -84,7 +77,11 @@ function makeCliDebugOptions(tag: string): { debug?: boolean; debugFile?: string
 	const seq = nextCliDebugSeq++;
 	const ts = new Date().toISOString().replace(/[:.]/g, "-");
 	const logDir = join(dirname(DEBUG_LOG_PATH), "cc-cli-logs");
-	try { mkdirSync(logDir, { recursive: true }); } catch { /* ignore */ }
+	try {
+		mkdirSync(logDir, { recursive: true });
+	} catch {
+		return {};
+	}
 	const debugFile = join(logDir, `${ts}-${tag}-${seq}.log`);
 	debug(`cli-debug: ${tag} #${seq} → ${debugFile}`);
 	return {
@@ -98,12 +95,15 @@ function makeCliDebugOptions(tag: string): { debug?: boolean; debugFile?: string
 	};
 }
 
-/** Unconditional diagnostic dump — for "should never happen" paths */
+/** Best-effort diagnostics, including when debug mode is off. */
 function diagDump(label: string, data: Record<string, unknown>) {
-	const ts = new Date().toISOString();
-	const entry = { ts, moduleInstanceId, label, ...data };
-	appendFileSync(DIAG_LOG_PATH, JSON.stringify(entry) + "\n");
-	debug(`DIAG: ${label} (see ${DIAG_LOG_PATH})`);
+	try {
+		const entry = { ts: new Date().toISOString(), moduleInstanceId, label, ...data };
+		const written = appendBridgeLog(DIAG_LOG_PATH, JSON.stringify(entry) + "\n");
+		debug(`DIAG: ${label} (${written ? "see" : "could not write"} ${DIAG_LOG_PATH})`);
+	} catch {
+		// Keep the original provider outcome if diagnostic data cannot be serialized.
+	}
 }
 
 // --- Constants ---
