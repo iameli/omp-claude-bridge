@@ -3,6 +3,7 @@
 import "./unit-askclaude-thinking.mjs";
 import "./unit-context-window.mjs";
 import "./unit-debug-reasoning.mjs";
+import "./unit-logging.mjs";
 import "./unit-model-discovery.mjs";
 import "./unit-prompt-append.mjs";
 import "./unit-prompt-capture.mjs";

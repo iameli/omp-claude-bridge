@@ -42,9 +42,25 @@ jobs:
       - name: Cross-version Zod compatibility
         run: bun run test:crossversion
 
-      - name: OMP 19 host compatibility
-        env:
-          OMP_HOST_VERSION: '19.0.1'
+  omp-19:
+    name: OMP ${{ matrix.version }} host compatibility
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ['19.0.1', '19.1.0']
+    env:
+      OMP_HOST_VERSION: ${{ matrix.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install OMP host dependencies
         run: |
           node --input-type=module <<'JS'
           import { readFileSync, writeFileSync } from 'node:fs';
@@ -55,6 +71,21 @@ jobs:
           writeFileSync('package.json', JSON.stringify(manifest, null, '\t') + '\n');
           JS
           bun install
+
+      # The 19.1.0 npm package omits this source import. Restore the released
+      # source for the host tests, which import OMP sources instead of its CLI bundle.
+      - name: Restore the OMP 19.1.0 browser relay import
+        if: matrix.version == '19.1.0'
+        working-directory: node_modules/@oh-my-pi
+        run: |
+          mkdir -p browser-relay/extension
+          curl --fail --silent --show-error --location --retry 3 \
+            https://raw.githubusercontent.com/can1357/oh-my-pi/a7135b8f31826c878734388b648f52bed8da436e/packages/browser-relay/extension/messages.ts \
+            --output browser-relay/extension/messages.ts
+          ln -s pi-coding-agent coding-agent
+
+      - name: Typecheck and test the host integration
+        run: |
           bun run typecheck
           bun test tests/omp-host-compat.test.mjs
           bun test ./tests/unit-model-discovery.mjs
