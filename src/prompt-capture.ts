@@ -85,6 +85,7 @@ export interface PromptCaptureDiagnostic {
  */
 export class PromptCaptures {
 	private readonly captures = new Map<string, PromptCapture>();
+	private readonly livePrompts = new Map<string, () => string[]>();
 	private readonly onDiagnose: (diagnostic: PromptCaptureDiagnostic) => void;
 
 	/** `limit` is set well above any plausible working set: a capture is tens of KB,
@@ -92,6 +93,13 @@ export class PromptCaptures {
 	 *  that rebuilds the prompt every turn. */
 	constructor(private readonly limit = 256, onDiagnose?: (diagnostic: PromptCaptureDiagnostic) => void) {
 		this.onDiagnose = onDiagnose ?? (() => {});
+	}
+
+	bindLivePrompt(sessionId: string, readPrompt: () => string[]): () => void {
+		this.livePrompts.set(sessionId, readPrompt);
+		return () => {
+			if (this.livePrompts.get(sessionId) === readPrompt) this.livePrompts.delete(sessionId);
+		};
 	}
 
 	record(systemPrompt: string, input: PromptCaptureInput): void {
@@ -139,12 +147,14 @@ export class PromptCaptures {
 	 * through unchanged (dropping it would be the silent instruction loss this
 	 * exists to prevent).
 	 *
-	 * Throws when a prompt matches neither route. Returning an empty capture would
+	 * Returns undefined for an absent prompt, or for a miss that exactly matches
+	 * the live session prompt and should be sent verbatim. Other misses throw.
+	 * Returning an empty capture would
 	 * hand Claude Code a turn with none of the user's context files, skills, custom
 	 * or append text — silently discarding policy the user wrote down. A failed turn
 	 * is recoverable; a silently under-instructed one is not.
 	 */
-	resolveOrDerive(systemPrompt?: string): PromptCapture | undefined {
+	resolveOrDerive(systemPrompt?: string, sessionId?: string): PromptCapture | undefined {
 		if (!systemPrompt) return undefined;
 		const exact = this.captures.get(systemPrompt);
 		if (exact) {
@@ -162,6 +172,7 @@ export class PromptCaptures {
 
 		const embedded = this.findInheritedPrompts(systemPrompt, systemPrompt);
 		if (embedded.length === 0) {
+			if (sessionId && this.livePrompts.get(sessionId)?.().join("\n\n") === systemPrompt) return undefined;
 			const matches = this.closestKnown(systemPrompt);
 			this.onDiagnose({ systemPrompt, matches });
 			throw new Error(
@@ -185,6 +196,7 @@ export class PromptCaptures {
 	/** Drop all lookup keys and inherited nodes owned only by this registry. */
 	clear(): void {
 		this.captures.clear();
+		this.livePrompts.clear();
 	}
 
 	/** Recency is by use, not just by record: a parent records once then only

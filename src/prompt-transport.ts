@@ -3,6 +3,7 @@ import { PromptCaptures, projectPromptCapture } from "./prompt-capture.js";
 export interface PromptTransportOptions {
 	cwd?: string;
 	initiatorOverride?: string;
+	sessionId?: string;
 	/** OMP advisor Agent bypasses before_agent_start but has an authoritative prompt. */
 	nativeAdvisor?: boolean;
 }
@@ -13,7 +14,7 @@ export type ProviderPromptTransport =
 			append?: string;
 	  }
 	| {
-			mode: "verbatim-side-request";
+		mode: "verbatim";
 			systemPrompt?: string;
 	  };
 
@@ -26,9 +27,9 @@ export type ProviderPromptTransport =
  * OMP 18.2.8 automatic continuations such as the todo reminder's
  * `scheduleAgentContinue` → `agent.continue()` — reuse that same established
  * prompt without emitting before_agent_start again. They therefore still MUST
- * resolve through PromptCaptures, and a miss remains fail-closed: an
- * unaccountable prompt on a cwd-bearing call means the portable OMP material
- * would be silently dropped.
+ * resolve through PromptCaptures even if OMP later changes the prompt. A new
+ * prompt can be used verbatim only when it exactly matches the live prompt of
+ * the same provider session. Unaccounted prompts still fail closed.
  *
  * Keeping the capture reachable for the whole life of a turn is the registry's
  * job, not this function's — see provider-registration.ts, where shared state
@@ -51,32 +52,14 @@ export function resolveProviderPromptTransport(
 	// directly by AdvisorController and never enters before_agent_start. The
 	// caller must verify both the dedicated advise tool and built-in prompt.
 	if (options?.nativeAdvisor) {
-		return { mode: "verbatim-side-request", systemPrompt: systemPrompt || undefined };
+		return { mode: "verbatim", systemPrompt: systemPrompt || undefined };
 	}
+	const known = captures.resolve(systemPrompt);
 	const isSideRequest = options?.cwd === undefined || options?.initiatorOverride === "agent";
-
-	if (isSideRequest) {
-		/*
-		 * Prefer a known capture when one exists: a side request can deliberately
-		 * reuse a previously assembled agent prompt, in which case projection
-		 * still avoids duplicating the OMP harness. An uncaptured side request is
-		 * expected and carries its exact prompt verbatim.
-		 */
-		const known = captures.resolve(systemPrompt);
-		if (known) {
-			return {
-				mode: "agent-preset",
-				append: projectPromptCapture(known) || undefined,
-			};
-		}
-
-		return {
-			mode: "verbatim-side-request",
-			systemPrompt: systemPrompt || undefined,
-		};
-	}
-
-	const capture = captures.resolveOrDerive(systemPrompt);
+	if (!known && isSideRequest) return { mode: "verbatim", systemPrompt: systemPrompt || undefined };
+	const capture = known ?? captures.resolveOrDerive(systemPrompt, options?.sessionId);
+	// An uncaptured prompt can reach here only through the live-session match.
+	if (!capture && systemPrompt) return { mode: "verbatim", systemPrompt };
 	return {
 		mode: "agent-preset",
 		append: capture ? projectPromptCapture(capture) || undefined : undefined,

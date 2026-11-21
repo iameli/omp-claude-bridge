@@ -247,7 +247,56 @@ test("the OMP host's bundled advisor prompt and advise tool select verbatim tran
 	assert.equal(nativeAdvisor, true);
 	assert.deepEqual(resolveProviderPromptTransport(new PromptCaptures(), context.systemPrompt.join("\n\n"), {
 		cwd: process.cwd(), nativeAdvisor,
-	}), { mode: "verbatim-side-request", systemPrompt: context.systemPrompt.join("\n\n") });
+	}), { mode: "verbatim", systemPrompt: context.systemPrompt.join("\n\n") });
+});
+
+test("a reviewer can send its own effective prompt after OMP changes it outside before_agent_start", async () => {
+	const fake = fakeExtensionApi();
+	registerBridge(fake.api, buildModels([catalogModel("claude-opus-5")]), {});
+	try {
+		const { systemPrompt: initial } = await buildSystemPrompt({
+			cwd: process.cwd(),
+			contextFiles: [{ path: "AGENTS.md", content: "REVIEW-PROJECT-POLICY" }],
+		});
+		let effective = initial;
+		const sessionContext = {
+			sessionManager: { getSessionId: () => "reviewer-session" },
+			getSystemPrompt: () => effective,
+		};
+		for (const handler of fake.handlers.get("session_start") ?? []) await handler({}, sessionContext);
+		for (const handler of fake.handlers.get("before_agent_start") ?? []) {
+			await handler({ systemPrompt: initial }, sessionContext);
+		}
+		// Change a block in place within the sequence, so the original whole prompt is not a substring.
+		const rebuilt = [
+			initial[0].replace("# Engineering", "# Engineering\nREVIEW-TOOL-POLICY"),
+			...initial.slice(1),
+			"Reviewer assignment",
+		];
+		effective = rebuilt;
+		const requestPrompt = effective.join("\n\n");
+		const request = { cwd: process.cwd(), sessionId: "reviewer-session" };
+		const captures = __test.promptCaptures();
+		assert.throws(() => resolveProviderPromptTransport(captures, requestPrompt, { ...request, sessionId: "other" }), /no capture/);
+		assert.throws(() => resolveProviderPromptTransport(captures, `UNACCOUNTED\n${requestPrompt}`, request), /no capture/);
+		assert.equal(resolveProviderPromptTransport(captures, initial.join("\n\n"), request).mode, "agent-preset");
+		assert.deepEqual(resolveProviderPromptTransport(captures, requestPrompt, request), {
+			mode: "verbatim",
+			systemPrompt: requestPrompt,
+		});
+		effective = [...initial, "LATE-WRAPPER-POLICY"];
+		const wrapped = resolveProviderPromptTransport(captures, effective.join("\n\n"), request);
+		assert.equal(wrapped.mode, "agent-preset");
+		assert.match(wrapped.append, /LATE-WRAPPER-POLICY/);
+		effective = rebuilt;
+		for (const handler of fake.handlers.get("session_switch") ?? []) {
+			await handler({ reason: "new" }, { ...sessionContext, sessionManager: { getSessionId: () => "new-session" } });
+		}
+		assert.throws(() => resolveProviderPromptTransport(captures, requestPrompt, request), /no capture/);
+		assert.equal(resolveProviderPromptTransport(captures, requestPrompt, { ...request, sessionId: "new-session" }).mode, "verbatim");
+	} finally {
+		for (const handler of fake.handlers.get("session_shutdown") ?? []) await handler({});
+	}
 });
 
 test("a subagent session shutdown leaves the parent's prompt capture usable", async () => {

@@ -249,10 +249,12 @@ under one extension instance while the parent-owned provider callback resolves i
 registry is released only when that provider-owning instance shuts down; a child-session
 shutdown cannot clear captures still needed by the parent.
 
-If a received **coding-agent turn** system prompt matches no capture and embeds no
-known capture, the bridge **fails closed** with a diagnostic instead of quietly calling
-Claude Code with missing instructions — a recoverable failed turn is better than silently
-losing the user's, project's, or agent's instructions.
+If OMP rebuilds the prompt after `before_agent_start`, the bridge can compare
+the received prompt against the live session's `getSystemPrompt()` using the
+provider session ID. An exact live match with no usable capture is forwarded
+verbatim to preserve instructions added after the initial capture. A prompt
+that matches neither the live session nor a captured prompt still fails closed
+with a diagnostic.
 
 OMP also performs provider-direct utility completions that intentionally never traverse
 `before_agent_start` — auto-thinking classification is one example. OMP's normal agent

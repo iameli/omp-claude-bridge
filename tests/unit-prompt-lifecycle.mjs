@@ -216,12 +216,12 @@ test("side requests keep transporting their exact prompt verbatim", () => {
 	main.beforeAgentStart(assembledPrompt("MAIN"));
 
 	assert.deepEqual(main.providerCall("Classify this request.", { cwd: undefined }), {
-		mode: "verbatim-side-request",
+		mode: "verbatim",
 		systemPrompt: "Classify this request.",
 	});
 	assert.deepEqual(
 		main.providerCall("Summarize for handoff.", { cwd: CWD, initiatorOverride: "agent" }),
-		{ mode: "verbatim-side-request", systemPrompt: "Summarize for handoff." },
+		{ mode: "verbatim", systemPrompt: "Summarize for handoff." },
 	);
 });
 

@@ -30,6 +30,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   remap), so model-specific `max`/`xhigh` fallbacks are preserved.
 
 ### Fixed
+- A reviewer or other live agent can now send a prompt that OMP rebuilt after
+  `before_agent_start`. The bridge verifies it against the effective prompt of
+  the same session and forwards it verbatim, preserving later instructions.
 - Prompt projection on OMP 19 now recognizes its generated default harness and
   `<project-context>` footer, preserving repository context, rules, skills and
   append instructions. Native advisor recognition also accepts the conventions
