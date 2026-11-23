@@ -89,10 +89,14 @@ export function convertPiMessages(
 			anthropicMessages.push({ role: "assistant", content: blocks });
 		} else if (msg.role === "toolResult") {
 			const text = typeof msg.content === "string" ? msg.content : messageContentToText(msg.content);
-			anthropicMessages.push({
-				role: "user",
-				content: [{ type: "tool_result", tool_use_id: sanitizeToolId(msg.toolCallId, sanitizedIds), content: text || "", is_error: msg.isError }],
-			});
+			const result = { type: "tool_result" as const, tool_use_id: sanitizeToolId(msg.toolCallId, sanitizedIds), content: text || "", is_error: msg.isError };
+			const previous = anthropicMessages[anthropicMessages.length - 1];
+			// Pairing repair expects all results for a parallel batch in one user message.
+			if (previous?.role === "user" && Array.isArray(previous.content) && previous.content[0]?.type === "tool_result") {
+				previous.content.push(result);
+			} else {
+				anthropicMessages.push({ role: "user", content: [result] });
+			}
 		}
 	}
 
